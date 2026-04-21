@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+# Master agent local state
+.data/
+.model-data
+.langgraph_api
+.claude
+.agents
+.motel-data
