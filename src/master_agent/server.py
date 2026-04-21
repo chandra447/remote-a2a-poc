@@ -108,8 +108,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         return ChatResponse(thread_id=thread_id, status="pending")
 
     messages = snapshot.values.get("messages", [])
-    reply = messages[-1].content if messages else None
-    return ChatResponse(thread_id=thread_id, status="completed", reply=reply)
+    return ChatResponse(thread_id=thread_id, status="completed", reply=_last_text(messages))
 
 
 @app.get("/chat/{thread_id}", response_model=ChatResponse)
@@ -125,5 +124,24 @@ async def poll_chat(thread_id: str) -> ChatResponse:
         return ChatResponse(thread_id=thread_id, status="pending")
 
     messages = snapshot.values.get("messages", [])
-    reply = messages[-1].content if messages else None
-    return ChatResponse(thread_id=thread_id, status="completed", reply=reply)
+    return ChatResponse(thread_id=thread_id, status="completed", reply=_last_text(messages))
+
+
+def _last_text(messages: list) -> str | None:
+    """Return the content of the last message that has non-empty text.
+
+    AIMessages that contain only tool calls have content="" — we skip those
+    and look backwards for the final human-readable reply.
+    """
+    for msg in reversed(messages):
+        content = getattr(msg, "content", None)
+        if content and isinstance(content, str):
+            return content
+        # content can also be a list of blocks (multi-modal) — join text blocks
+        if isinstance(content, list):
+            text = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")
+            ).strip()
+            if text:
+                return text
+    return None
