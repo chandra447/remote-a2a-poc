@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -16,6 +18,10 @@ from a2a.types import (
 )
 
 from company_expert.agent import finance_agent
+from company_expert.settings import AppSettings
+
+logger = logging.getLogger(__name__)
+_settings = AppSettings()
 
 
 class CompanyExpertExecutor(AgentExecutor):
@@ -30,6 +36,15 @@ class CompanyExpertExecutor(AgentExecutor):
                 final=False,
             )
         )
+
+        delay = _settings.artificial_delay_s
+        if delay > 0:
+            logger.info(
+                "task %s: sleeping %.0fs to simulate long-running work",
+                context.task_id,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
         result = await finance_agent.ainvoke(
             {"messages": [HumanMessage(content=user_input)]}

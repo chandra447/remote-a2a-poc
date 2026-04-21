@@ -10,7 +10,9 @@ from a2a.client import A2ACardResolver, Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
     Message,
+    MessageSendConfiguration,
     Part,
+    PushNotificationConfig,
     Role,
     Task,
     TaskArtifactUpdateEvent,
@@ -86,6 +88,50 @@ class RemoteA2AAgent:
             factory = ClientFactory(config)
             self._client = factory.create(self._card)
             return self._client
+
+    async def send_nonblocking(
+        self,
+        prompt: str,
+        *,
+        webhook_url: str,
+        context_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Fire-and-forget send — returns (task_id, context_id) immediately.
+
+        The specialist will POST the completed Task to webhook_url when done.
+        Uses a short-lived httpx client so the connection is not held open.
+        """
+        if self._card is None:
+            await self.resolve_card()
+        assert self._card is not None
+
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            cfg = ClientConfig(
+                httpx_client=http,
+                streaming=False,
+                accepted_output_modes=["text/plain"],
+                push_notification_configs=[PushNotificationConfig(url=webhook_url)],
+            )
+            client = ClientFactory(cfg).create(self._card)
+
+            message = Message(
+                message_id=str(uuid.uuid4()),
+                role=Role.user,
+                parts=[Part(root=TextPart(text=prompt))],
+                context_id=context_id,
+            )
+            send_cfg = MessageSendConfiguration(
+                blocking=False,
+                accepted_output_modes=["text/plain"],
+            )
+
+            # Consume only the first event to get task_id; stop there.
+            async for event in client.send_message(message, configuration=send_cfg):
+                if isinstance(event, tuple):
+                    task, _ = event
+                    return task.id, task.context_id
+
+        raise RuntimeError("A2A specialist returned no initial task event")
 
     async def aclose(self) -> None:
         if self._http is not None:
