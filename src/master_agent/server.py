@@ -81,7 +81,9 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     thread_id: str
-    status: str   # "completed" | "pending"
+    status: str          # "completed" | "pending" | "not_found"
+    task_id: str | None = None      # A2A task_id while pending
+    context_id: str | None = None   # A2A context_id while pending
     reply: str | None = None
 
 
@@ -104,8 +106,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
     snapshot = await _graph.aget_state(config)
 
     if snapshot.next:
-        logger.info("thread=%s suspended — waiting for specialist webhook", thread_id)
-        return ChatResponse(thread_id=thread_id, status="pending")
+        task_id, context_id = _interrupted_task_ids(snapshot)
+        logger.info(
+            "thread=%s suspended — task_id=%s context_id=%s waiting for webhook",
+            thread_id, task_id, context_id,
+        )
+        return ChatResponse(
+            thread_id=thread_id, status="pending",
+            task_id=task_id, context_id=context_id,
+        )
 
     messages = snapshot.values.get("messages", [])
     return ChatResponse(thread_id=thread_id, status="completed", reply=_last_text(messages))
@@ -121,10 +130,24 @@ async def poll_chat(thread_id: str) -> ChatResponse:
         return ChatResponse(thread_id=thread_id, status="not_found")
 
     if snapshot.next:
-        return ChatResponse(thread_id=thread_id, status="pending")
+        task_id, context_id = _interrupted_task_ids(snapshot)
+        return ChatResponse(
+            thread_id=thread_id, status="pending",
+            task_id=task_id, context_id=context_id,
+        )
 
     messages = snapshot.values.get("messages", [])
     return ChatResponse(thread_id=thread_id, status="completed", reply=_last_text(messages))
+
+
+def _interrupted_task_ids(snapshot) -> tuple[str | None, str | None]:
+    """Extract (task_id, context_id) stored in the interrupt() value."""
+    for pending_task in snapshot.tasks:
+        for interrupt_obj in getattr(pending_task, "interrupts", []):
+            val = getattr(interrupt_obj, "value", None) or {}
+            if isinstance(val, dict) and val.get("task_id"):
+                return val["task_id"], val.get("context_id")
+    return None, None
 
 
 def _last_text(messages: list) -> str | None:

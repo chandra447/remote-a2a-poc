@@ -113,23 +113,32 @@ def _make_async_tool(
         if not thread_id:
             raise ValueError("thread_id missing from LangGraph config")
 
+        peer_name = remote.card.name if remote.card else "unknown"
+
         # 1. Non-blocking send — returns in <1s with task_id
-        task_id, context_id = await remote.send_nonblocking(
-            question, webhook_url=webhook_url
-        )
+        try:
+            task_id, context_id = await remote.send_nonblocking(
+                question, webhook_url=webhook_url
+            )
+        except Exception as exc:
+            logger.error("send_nonblocking to %s failed: %s", peer_name, exc, exc_info=True)
+            raise
+
         logger.info(
-            "task %s submitted to %s — awaiting webhook callback",
-            task_id,
-            remote.card.name if remote.card else "unknown",
+            "task_id=%s context_id=%s submitted to %s — suspending graph, "
+            "waiting for webhook at %s",
+            task_id, context_id, peer_name, webhook_url,
         )
 
-        # 2. Register correlation BEFORE interrupt to avoid race with fast specialist
+        # 2. Register correlation BEFORE interrupt to avoid a race where a fast
+        #    specialist posts the webhook before the correlation is stored.
         correlation_store.put(task_id, thread_id, context_id)
 
-        # 3. Suspend graph — LangGraph checkpoints state here.
-        #    Execution resumes when the webhook handler calls Command(resume=...).
+        # 3. Suspend the LangGraph graph here.  LangGraph checkpoints the state.
+        #    The webhook handler will call Command(resume=...) to continue.
         resume_payload: dict = interrupt({"task_id": task_id, "status": "working"})
 
+        logger.info("graph resumed for task_id=%s thread_id=%s", task_id, thread_id)
         return resume_payload.get("text", "(specialist returned no text)")
 
     return _call
