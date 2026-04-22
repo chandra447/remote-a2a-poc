@@ -7,9 +7,9 @@ from langchain_core.messages import HumanMessage
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import (
-    Message,
+    Artifact,
     Part,
-    Role,
+    TaskArtifactUpdateEvent,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
@@ -52,12 +52,15 @@ class CompanyExpertExecutor(AgentExecutor):
         output: str = result["messages"][-1].content
 
         await event_queue.enqueue_event(
-            Message(
-                message_id=str(uuid.uuid4()),
-                role=Role.agent,
-                parts=[Part(root=TextPart(text=output))],
+            TaskArtifactUpdateEvent(
                 task_id=context.task_id,
                 context_id=context.context_id,
+                artifact=Artifact(
+                    artifact_id=str(uuid.uuid4()),
+                    parts=[Part(root=TextPart(text=output))],
+                ),
+                append=False,
+                last_chunk=True,
             )
         )
 

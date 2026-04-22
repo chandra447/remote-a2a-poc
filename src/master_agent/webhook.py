@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from langgraph.types import Command
 
 from master_agent.correlation import store as correlation_store
@@ -21,11 +22,11 @@ def set_graph(graph) -> None:
 
 
 @router.post("/webhook/a2a", status_code=202)
-async def handle_a2a_callback(payload: dict) -> dict:
+async def handle_a2a_callback(payload: dict, background_tasks: BackgroundTasks) -> dict:
     """Receive a completed-task push notification from a specialist A2A server.
 
-    The specialist POSTs the full Task JSON here when work finishes.
-    We look up the suspended LangGraph thread and resume it.
+    Returns 202 immediately; graph resume runs as a background task so the
+    specialist's httpx client doesn't time out waiting for the LLM response.
     """
     task_id = payload.get("id")
     if not task_id:
@@ -33,7 +34,6 @@ async def handle_a2a_callback(payload: dict) -> dict:
 
     entry = correlation_store.get(task_id)
     if entry is None:
-        # Could be a retried delivery for a task we already handled.
         logger.warning("webhook: unknown task_id=%s — ignoring", task_id)
         return {"status": "ignored", "reason": "unknown_task"}
 
@@ -41,15 +41,23 @@ async def handle_a2a_callback(payload: dict) -> dict:
         raise HTTPException(status_code=503, detail="graph not initialised yet")
 
     text = _extract_text(payload)
-    logger.info("webhook: task=%s resumed thread=%s", task_id, entry.thread_id)
+    logger.info("webhook: task=%s resuming thread=%s in background", task_id, entry.thread_id)
 
-    await _graph.ainvoke(
-        Command(resume={"text": text, "task_id": task_id}),
-        config={"configurable": {"thread_id": entry.thread_id}},
-    )
+    background_tasks.add_task(_resume_graph, task_id, entry.thread_id, text)
+    return {"status": "accepted", "task_id": task_id}
 
-    correlation_store.delete(task_id)
-    return {"status": "resumed", "task_id": task_id}
+
+async def _resume_graph(task_id: str, thread_id: str, text: str) -> None:
+    try:
+        await _graph.ainvoke(
+            Command(resume={"text": text, "task_id": task_id}),
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        logger.info("webhook: graph resumed successfully task=%s thread=%s", task_id, thread_id)
+    except Exception:
+        logger.exception("webhook: graph resume failed task=%s thread=%s", task_id, thread_id)
+    finally:
+        correlation_store.delete(task_id)
 
 
 def _extract_text(task: dict) -> str:

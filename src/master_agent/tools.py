@@ -4,9 +4,12 @@ import logging
 import re
 from dataclasses import dataclass
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
+from langgraph.types import interrupt
 
 from master_agent.a2a_client import RemoteA2AAgent
+from master_agent.correlation import store as correlation_store
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +105,6 @@ def _make_async_tool(
     description: str,
     webhook_url: str,
 ) -> BaseTool:
-    from langchain_core.runnables import RunnableConfig
-    from langgraph.types import interrupt
-
-    from master_agent.correlation import store as correlation_store
-
     @tool(tool_name, description=description)
     async def _call(question: str, config: RunnableConfig) -> str:
         thread_id = (config.get("configurable") or {}).get("thread_id")

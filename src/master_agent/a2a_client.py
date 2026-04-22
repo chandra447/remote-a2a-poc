@@ -134,7 +134,7 @@ class RemoteA2AAgent:
         # Phase 2 — register webhook so specialist POSTs back when done
         await client.set_task_callback(
             TaskPushNotificationConfig(
-                id=task_id,
+                task_id=task_id,
                 push_notification_config=PushNotificationConfig(url=webhook_url),
             )
         )

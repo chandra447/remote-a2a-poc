@@ -14,7 +14,7 @@ class MasterSettings(BaseSettings):
     ollama_host: str | None = Field(default=None, alias="OLLAMA_HOST")
 
     a2a_peer_urls: str = Field(
-        default="http://localhost:8000",
+        default="http://localhost:8001",
         description="Comma-separated base URLs of A2A peer agents to discover.",
         alias="A2A_PEER_URLS",
     )

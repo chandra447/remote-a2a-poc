@@ -10,6 +10,8 @@ from master_agent.settings import MasterSettings
 
 
 def main() -> None:
+    import logging
+    logging.basicConfig(level=logging.INFO)
     settings = MasterSettings()
     uvicorn.run(
         app,

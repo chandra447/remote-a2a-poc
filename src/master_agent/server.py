@@ -151,20 +151,45 @@ def _interrupted_task_ids(snapshot) -> tuple[str | None, str | None]:
 
 
 def _last_text(messages: list) -> str | None:
-    """Return the content of the last message that has non-empty text.
+    """Return the best human-readable reply from the message list.
 
-    AIMessages that contain only tool calls have content="" — we skip those
-    and look backwards for the final human-readable reply.
+    Finds the last AIMessage (no tool_calls) and the last ToolMessage.
+    If the ToolMessage is substantially richer than the AI synthesis,
+    return the ToolMessage content so the user sees the actual specialist data.
     """
+    final_ai: str | None = None
+    specialist_result: str | None = None
+
     for msg in reversed(messages):
+        msg_type = type(msg).__name__
         content = getattr(msg, "content", None)
-        if content and isinstance(content, str):
-            return content
-        # content can also be a list of blocks (multi-modal) — join text blocks
-        if isinstance(content, list):
-            text = " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")
-            ).strip()
-            if text:
-                return text
+
+        if msg_type in ("ToolMessage", "FunctionMessage") and specialist_result is None:
+            specialist_result = _extract_content(content)
+            continue
+
+        if getattr(msg, "tool_calls", None):
+            continue
+
+        if msg_type == "HumanMessage":
+            continue
+
+        if final_ai is None:
+            final_ai = _extract_content(content)
+
+    # Prefer specialist result if AI synthesis is much shorter (LLM just echoed back a summary)
+    if specialist_result and final_ai:
+        if len(specialist_result) > len(final_ai) * 2:
+            return specialist_result
+    return final_ai or specialist_result
+
+
+def _extract_content(content) -> str | None:
+    if content and isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text = " ".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")
+        ).strip()
+        return text or None
     return None
