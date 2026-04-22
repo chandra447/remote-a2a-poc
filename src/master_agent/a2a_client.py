@@ -10,10 +10,13 @@ from a2a.client import A2ACardResolver, Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
     Message,
+    MessageSendConfiguration,
     Part,
+    PushNotificationConfig,
     Role,
     Task,
     TaskArtifactUpdateEvent,
+    TaskPushNotificationConfig,
     TaskState,
     TaskStatusUpdateEvent,
     TextPart,
@@ -86,6 +89,57 @@ class RemoteA2AAgent:
             factory = ClientFactory(config)
             self._client = factory.create(self._card)
             return self._client
+
+    async def send_nonblocking(
+        self,
+        prompt: str,
+        *,
+        webhook_url: str,
+        context_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Fire-and-forget send — returns (task_id, context_id) immediately.
+
+        Two-phase:
+          1. message/send with blocking=False  →  server returns task immediately
+             with state=working; background processing starts on the server.
+          2. tasks/pushNotificationConfig/set  →  registers the webhook URL so
+             the server POSTs the completed Task when background work is done.
+        """
+        client = await self._ensure_client()
+
+        message = Message(
+            message_id=str(uuid.uuid4()),
+            role=Role.user,
+            parts=[Part(root=TextPart(text=prompt))],
+            context_id=context_id,
+        )
+        send_cfg = MessageSendConfiguration(
+            blocking=False,
+            accepted_output_modes=["text/plain"],
+        )
+
+        # Phase 1 — consume only the first event to capture task_id
+        task_id: str | None = None
+        task_context_id: str | None = None
+        async for event in client.send_message(message, configuration=send_cfg):
+            if isinstance(event, tuple):
+                task, _ = event
+                task_id = task.id
+                task_context_id = task.context_id
+                break  # don't wait for completion
+
+        if task_id is None:
+            raise RuntimeError("A2A specialist returned no initial task event")
+
+        # Phase 2 — register webhook so specialist POSTs back when done
+        await client.set_task_callback(
+            TaskPushNotificationConfig(
+                task_id=task_id,
+                push_notification_config=PushNotificationConfig(url=webhook_url),
+            )
+        )
+
+        return task_id, task_context_id
 
     async def aclose(self) -> None:
         if self._http is not None:

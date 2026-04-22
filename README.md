@@ -4,6 +4,13 @@ A proof-of-concept exploring **Google's Agent-to-Agent (A2A) Protocol** for
 connecting a LangGraph master/orchestrator agent to remote specialist agents
 across independent services.
 
+> **`feat/async-push-notification` branch** — upgrades the POC to a fully async,
+> webhook-driven flow using A2A push notifications and LangGraph `interrupt()` /
+> `Command(resume=...)`. The master returns immediately with `status=pending`,
+> the specialist does its work independently, then pushes a callback when done.
+> See [`docs/async-push-notification-implementation.md`](docs/async-push-notification-implementation.md)
+> for the full implementation deep-dive.
+
 ---
 
 ## What This Explores
@@ -14,7 +21,7 @@ across independent services.
 | Does A2A give the master agent enough context to route intelligently? | Yes — skills, descriptions, and examples from the card go directly into the LLM's tool schema |
 | Can specialist agents be deployed independently with no master-side code change? | Yes — master reads the card from `/.well-known/agent-card.json` and auto-creates a LangChain tool |
 | Does OpenTelemetry tracing span across both agents? | Partial — traces propagate via `traceparent` header; tool-call spans inside the specialist are in a child span |
-| Can this scale to async, long-running specialists in different AWS landing zones? | Designed but not implemented here — see [`docs/a2a-async-orchestration.md`](docs/a2a-async-orchestration.md) |
+| Can this scale to async, long-running specialists in different AWS landing zones? | Designed and implemented — see [`docs/async-push-notification-implementation.md`](docs/async-push-notification-implementation.md) |
 
 ---
 
@@ -89,7 +96,7 @@ across independent services.
 
 | Limitation | Root Cause | Solution (see async doc) |
 |---|---|---|
-| Synchronous blocking on long tasks | Master holds HTTP connection while specialist works | A2A `blocking=false` + push notification webhook |
+| Synchronous blocking on long tasks | Master held HTTP connection while specialist worked | **Solved** — A2A `blocking=false` + push notification webhook (this branch) |
 | Single-instance state (SQLite checkpointer) | LangGraph SQLite is local-only | Switch to `AsyncPostgresSaver` on RDS |
 | No cross-LZ auth on webhook callbacks | Not needed for local POC | AWS SigV4 + IAM on API Gateway webhook route |
 | Tool-call spans not nested in master trace | A2A hops break the OTel parent | Propagate `traceparent` inside A2A task metadata |
@@ -130,9 +137,15 @@ TAVILY_API_KEY=tvly-...
 # Company expert server
 AGENT_HOST=0.0.0.0
 AGENT_PORT=8001
+ARTIFICIAL_DELAY_S=10        # seconds of artificial delay (simulates long-running work)
 
-# Master agent peers (comma-separated A2A server URLs)
+# Master agent
+MASTER_HOST=0.0.0.0
+MASTER_PORT=8000
 A2A_PEER_URLS=http://localhost:8001
+WEBHOOK_URL=http://localhost:8000/webhook/a2a
+A2A_REQUEST_TIMEOUT_S=30
+CHECKPOINT_DB_PATH=.data/master_agent_checkpoints.sqlite
 ```
 
 ---
@@ -147,19 +160,39 @@ uv run python main.py
 # AgentCard: http://localhost:8001/.well-known/agent-card.json
 ```
 
-### 2. Start the Master Agent (LangGraph Studio)
+### 2. Start the Master Agent (HTTP server)
+
+```bash
+uv run python -m master_agent
+# Server starts on http://localhost:8000
+```
+
+### 3. Send a request and poll
+
+```bash
+# Fire the request — returns immediately with status=pending
+curl -s -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "Compare Nvidia FY25 Q1 and Q2 earnings"}' | jq .
+# → {"thread_id": "...", "status": "pending", "task_id": "...", "reply": null}
+
+# Poll until the specialist callback arrives and LLM synthesises the answer
+curl -s http://localhost:8000/chat/<thread_id> | jq .
+# → {"thread_id": "...", "status": "completed", "reply": "..."}
+```
+
+**What happens in between:**
+1. Master delegates to company expert via A2A `message/send` (`blocking=False`)
+2. Master suspends via LangGraph `interrupt()` — state written to SQLite
+3. Company expert runs Tavily search (+ artificial delay) then POSTs to `/webhook/a2a`
+4. Webhook resumes the graph; LLM synthesises the final answer
+
+### 4. LangGraph Studio (optional)
 
 ```bash
 uv run --group dev langgraph dev
 # Studio opens at http://localhost:2024
 ```
-
-Open the LangGraph Studio URL in your browser and send a question like:
-
-> *"What are Apple's latest quarterly earnings and how does its revenue growth compare to Microsoft?"*
-
-The master agent will discover the company expert peer, delegate the question,
-and synthesise the response.
 
 ### 3. Optional — view traces with Motel
 
@@ -186,17 +219,21 @@ enable tracing.
 ├── src/
 │   ├── company_expert/
 │   │   ├── agent.py                 # LangChain agent + Tavily tool
-│   │   ├── executor.py              # A2A AgentExecutor adapter
-│   │   ├── settings.py              # Pydantic settings (env vars)
+│   │   ├── executor.py              # A2A AgentExecutor — emits TaskArtifactUpdateEvent
+│   │   ├── settings.py              # Pydantic settings (ARTIFICIAL_DELAY_S etc.)
 │   │   └── tracing.py               # OpenTelemetry setup
 │   └── master_agent/
 │       ├── agent.py                 # LangGraph create_agent + peer wiring
-│       ├── a2a_client.py            # RemoteA2AAgent (A2A JSON-RPC client)
-│       ├── tools.py                 # build_peer_tools() — card → LangChain tool
-│       ├── settings.py              # Pydantic settings (env vars)
-│       └── __main__.py              # CLI entry point
+│       ├── a2a_client.py            # RemoteA2AAgent — send_nonblocking() + ask()
+│       ├── correlation.py           # In-memory task_id → thread_id store
+│       ├── server.py                # FastAPI: /chat, /chat/{id}, /webhook/a2a
+│       ├── tools.py                 # build_async_peer_tools() — interrupt-based tools
+│       ├── webhook.py               # Push-notification callback handler
+│       ├── settings.py              # Pydantic settings (WEBHOOK_URL etc.)
+│       └── __main__.py              # CLI entry point (uvicorn)
 └── docs/
-    └── a2a-async-orchestration.md   # Production async design doc
+    ├── a2a-async-orchestration.md                  # Production async design doc
+    └── async-push-notification-implementation.md   # This branch: implementation deep-dive
 ```
 
 ---

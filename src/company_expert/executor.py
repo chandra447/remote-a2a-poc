@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -5,9 +7,9 @@ from langchain_core.messages import HumanMessage
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import (
-    Message,
+    Artifact,
     Part,
-    Role,
+    TaskArtifactUpdateEvent,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
@@ -16,6 +18,10 @@ from a2a.types import (
 )
 
 from company_expert.agent import finance_agent
+from company_expert.settings import AppSettings
+
+logger = logging.getLogger(__name__)
+_settings = AppSettings()
 
 
 class CompanyExpertExecutor(AgentExecutor):
@@ -31,18 +37,30 @@ class CompanyExpertExecutor(AgentExecutor):
             )
         )
 
+        delay = _settings.artificial_delay_s
+        if delay > 0:
+            logger.info(
+                "task %s: sleeping %.0fs to simulate long-running work",
+                context.task_id,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
         result = await finance_agent.ainvoke(
             {"messages": [HumanMessage(content=user_input)]}
         )
         output: str = result["messages"][-1].content
 
         await event_queue.enqueue_event(
-            Message(
-                message_id=str(uuid.uuid4()),
-                role=Role.agent,
-                parts=[Part(root=TextPart(text=output))],
+            TaskArtifactUpdateEvent(
                 task_id=context.task_id,
                 context_id=context.context_id,
+                artifact=Artifact(
+                    artifact_id=str(uuid.uuid4()),
+                    parts=[Part(root=TextPart(text=output))],
+                ),
+                append=False,
+                last_chunk=True,
             )
         )
 
